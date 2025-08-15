@@ -101,6 +101,42 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     
     return decorated
+
+@app.route('/register', methods=['POST'])
+@limiter.limit("10 per minute")
+def register():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    email = data.get('email')
+
+    if not username or not password or not email:
+        return jsonify({'message': 'Missing fields!'}), 400
+
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return jsonify({'message': 'Invalid email format!'}), 400
+
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("INSERT INTO users (username, password, email) VALUES (%s, %s, %s)", (username, hashed_password, email))
+        conn.commit()
+        user_id = cursor.lastrowid
+        cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User registered')", (user_id,))
+        conn.commit()
+    except mysql.connector.Error as err:
+        conn.rollback()
+        if err.errno == mysql.connector.errorcode.ER_DUP_ENTRY:
+            return jsonify({'message': "Ez az email cím vagy felhasználónév már foglalt!"}), 500
+        return jsonify({'message': f"Database error: {err}"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+    return jsonify({'message': 'User registered successfully!'}), 201
 if __name__ == '__main__':
     conn = mysql.connector.connect(
         host="localhost",
