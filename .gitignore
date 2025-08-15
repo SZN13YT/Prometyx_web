@@ -1,0 +1,5 @@
+# Helyi fejlesztéshez használt beállítások
+.env
+
+# Teszt környezetek
+test/
