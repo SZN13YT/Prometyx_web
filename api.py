@@ -42,6 +42,7 @@ def init_db():
             username VARCHAR(255) NOT NULL UNIQUE,
             password VARCHAR(255) NOT NULL,
             email VARCHAR(255) NOT NULL UNIQUE,
+            admin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
@@ -50,6 +51,7 @@ def init_db():
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id INT NOT NULL,
             action VARCHAR(255) NOT NULL,
+            admin_name VARCHAR(255) DEFAULT NULL,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
@@ -75,6 +77,8 @@ def init_db():
     for q in tables:
         cursor.execute(q)
 
+    cursor.execute("INSERT INTO users (username, password, email, admin) VALUES (%s, %s, %s, %s)",
+                   ('admin', bcrypt.hashpw(os.getenv('DB_ADMINPASS').encode('utf-8'), bcrypt.gensalt()), os.getenv('DB_ADMINEMAIL'), True))
     conn.commit()
     conn.close()
 
@@ -123,7 +127,6 @@ def register():
     
     try:
         cursor.execute("INSERT INTO users (username, password, email) VALUES (%s, %s, %s)", (username, hashed_password, email))
-        conn.commit()
         user_id = cursor.lastrowid
         cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User registered')", (user_id,))
         conn.commit()
@@ -137,6 +140,73 @@ def register():
         conn.close()
 
     return jsonify({'message': 'User registered successfully!'}), 201
+
+@app.route('/admin_register', methods=['POST'])
+@token_required
+def admin_register(current_user):
+    if not current_user['admin']:
+        return jsonify({'message': 'Admin privileges required!'}), 403
+    data = request.get_json()
+    username = data.get('username')
+    current_password = data.get('current_password')
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM users WHERE id = %s", (current_user['id'],))
+    admin_user = cursor.fetchone()
+
+    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({'message': 'User not found!'}), 404
+    if not bcrypt.checkpw(current_password.encode('utf-8'), admin_user['password'].encode('utf-8')):
+        return jsonify({'message': 'Wrong password!'}), 401
+    if user['admin']:
+        return jsonify({'message': 'User is already an admin!'}), 400
+    cursor.execute("UPDATE users SET admin = TRUE WHERE id = %s", (user['id'],))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User promoted to admin')", (user['id'],))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({'message': 'User promoted to admin successfully!'}), 200
+
+@app.route("/login", methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Missing fields!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+    user = cursor.fetchone()
+
+    if not user:
+        return jsonify({'message': 'User not found!'}), 404
+    if not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+        cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'Failed login attempt')", (user['id'],))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Wrong password!'}), 401
+
+    token = jwt.encode({
+        'user_id': user['id'],
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+        'admin': user['admin']
+    }, secret_key, algorithm="HS256")
+
+    cursor.execute("INSERT INTO tokens (user_id, token) VALUES (%s, %s)", (user['id'], token))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User logged in')", (user['id'],))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({'token': token, 'message': 'Login was succes.'}), 200
+
 if __name__ == '__main__':
     conn = mysql.connector.connect(
         host="localhost",
@@ -144,8 +214,10 @@ if __name__ == '__main__':
         password=os.getenv("DB_ROOT")
     )
     cursor = conn.cursor()
+    #cursor.execute(f"DROP DATABASE IF EXISTS {os.getenv('DB_NAME')}")
     cursor.execute(f"SHOW DATABASES LIKE '{os.getenv('DB_NAME')}'")
     if not cursor.fetchone():
+        #print(1)
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS {os.getenv('DB_NAME')}")
         cursor.execute(f"CREATE USER IF NOT EXISTS '{os.getenv('DB_USER')}'@'localhost' IDENTIFIED BY '{os.getenv('DB_PASS')}'")
         cursor.execute(f"GRANT ALL PRIVILEGES ON {os.getenv('DB_NAME')}.* TO '{os.getenv('DB_USER')}'@'localhost'")
