@@ -87,7 +87,7 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = None
         if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]
+            token = request.headers['Authorization']    
         
         if not token:
             return jsonify({'message': 'Token is missing!'}), 401
@@ -206,6 +206,25 @@ def login():
     cursor.close()
     conn.close()
     return jsonify({'token': token, 'message': 'Login was succes.'}), 200
+
+
+@app.route("/logout", methods=['POST'])
+@token_required
+def logout(current_user):
+    token = request.headers.get('Authorization')
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("INSERT INTO blacklist (token) VALUES (%s)", (token,))
+    cursor.execute("DELETE FROM tokens WHERE token = %s", (token,))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User logged out')", (current_user['id'],))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return jsonify({'message': 'Logged out successfully!'}), 200
 
 if __name__ == '__main__':
     conn = mysql.connector.connect(
