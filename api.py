@@ -71,7 +71,14 @@ def init_db():
             token VARCHAR(255) NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """,
         """
+        CREATE TABLE IF NOT EXISTS special_tokens (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            token VARCHAR(255) NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            action VARCHAR(255) NOT NULL
+        )"""
     ]
 
     for q in tables:
@@ -175,18 +182,20 @@ def login():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
+    email = data.get('email')
 
-    if not username or not password:
+    if not username and not email or not password:
         return jsonify({'message': 'Missing fields!'}), 400
-
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+    if not username:
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    else:
+        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
     user = cursor.fetchone()
 
     if not user:
-        return jsonify({'message': 'User not found!'}), 404
+       return jsonify({'message': 'User not found!'}), 404
     if not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
         cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'Failed login attempt')", (user['id'],))
         conn.commit()
@@ -199,24 +208,34 @@ def login():
         'admin': user['admin']
     }, secret_key, algorithm="HS256")
 
+    refresh_token = jwt.encode({
+        'user_id': user['id'],
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=30),
+        'admin': user['admin']
+    }, secret_key, algorithm="HS256")
+
     cursor.execute("INSERT INTO tokens (user_id, token) VALUES (%s, %s)", (user['id'], token))
+    cursor.execute("INSERT INTO special_tokens (token, action) VALUES (%s, 'Refresh Token')", (refresh_token,))
     cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User logged in')", (user['id'],))
     
     conn.commit()
     cursor.close()
     conn.close()
-    return jsonify({'token': token, 'message': 'Login was succes.'}), 200
+    return jsonify({'token': token, 'refresh_token' :refresh_token, 'message': 'Login was success.'}), 200
 
 
 @app.route("/logout", methods=['POST'])
 @token_required
 def logout(current_user):
     token = request.headers.get('Authorization')
-    
+    refresh_token = request.headers.get('refresh_token')
+
     conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute("INSERT INTO blacklist (token) VALUES (%s)", (token,))
+    cursor.execute("INSERT INTO blacklist (token) VALUES (%s)", (refresh_token,))
+
     cursor.execute("DELETE FROM tokens WHERE token = %s", (token,))
     cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'User logged out')", (current_user['id'],))
     
@@ -226,6 +245,37 @@ def logout(current_user):
     
     return jsonify({'message': 'Logged out successfully!'}), 200
 
+@app.route("/change-password", methods=['PUT'])
+@token_required
+def change_password(current_user):
+    data = request.get_json()
+    new_password = data.get('new_password')
+    current_password = data.get('current_password')
+
+    if not new_password or not current_password:
+        return jsonify({'message': 'Missing fields!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM users WHERE id = %s", (current_user['id'],))
+    user = cursor.fetchone()
+
+    if not bcrypt.checkpw(current_password.encode('utf-8'), user['password'].encode('utf-8')):
+        return jsonify({'message': 'Wrong password!'}), 401
+    if bcrypt.checkpw(new_password.encode('utf-8'), user['password'].encode('utf-8')):
+        return jsonify({'message': 'New password cannot be the same as the old one!'}), 400
+    hashed_new_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+    
+    cursor.execute("UPDATE users SET password = %s WHERE id = %s", (hashed_new_password, current_user['id']))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'Password changed')", (current_user['id'],))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return jsonify({'message': 'Password changed successfully!'}), 200
+
 if __name__ == '__main__':
     conn = mysql.connector.connect(
         host="localhost",
@@ -233,10 +283,9 @@ if __name__ == '__main__':
         password=os.getenv("DB_ROOT")
     )
     cursor = conn.cursor()
-    #cursor.execute(f"DROP DATABASE IF EXISTS {os.getenv('DB_NAME')}")
+    cursor.execute(f"DROP DATABASE IF EXISTS {os.getenv('DB_NAME')}")
     cursor.execute(f"SHOW DATABASES LIKE '{os.getenv('DB_NAME')}'")
     if not cursor.fetchone():
-        #print(1)
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS {os.getenv('DB_NAME')}")
         cursor.execute(f"CREATE USER IF NOT EXISTS '{os.getenv('DB_USER')}'@'localhost' IDENTIFIED BY '{os.getenv('DB_PASS')}'")
         cursor.execute(f"GRANT ALL PRIVILEGES ON {os.getenv('DB_NAME')}.* TO '{os.getenv('DB_USER')}'@'localhost'")
