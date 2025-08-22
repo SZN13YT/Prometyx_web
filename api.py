@@ -276,6 +276,126 @@ def change_password(current_user):
     
     return jsonify({'message': 'Password changed successfully!'}), 200
 
+@app.route("/refresh-token", methods=['POST'])
+@token_required
+def refresh_token(current_user):
+    refresh_token = request.headers.get('refresh_token')
+    
+    if not refresh_token:
+        return jsonify({'message': 'Refresh token is missing!'}), 401
+
+    try:
+        data = jwt.decode(refresh_token, secret_key, algorithms=["HS256"])
+        if data['user_id'] != current_user['id']:
+            return jsonify({'message': 'Invalid refresh token!'}), 401
+    except jwt.ExpiredSignatureError:
+        return jsonify({'message': 'Refresh token has expired!'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'message': 'Invalid refresh token!'}), 401
+
+    new_token = jwt.encode({
+        'user_id': current_user['id'],
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+        'admin': current_user['admin']
+    }, secret_key, algorithm="HS256")
+
+    return jsonify({'token': new_token, 'message': 'Token refreshed successfully!'}), 200
+
+@app.route("/change-password", methods=['PUT'])
+@token_required
+def change_password(current_user):
+    data = request.get_json()
+    new_password = data.get('n_pass')
+    current_password = data.get('c_pass')
+
+    if not new_password or not current_password:
+        return jsonify({'message': 'Missing fields!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM users WHERE id = %s", (current_user['id'],))
+    user = cursor.fetchone()
+
+    if not bcrypt.checkpw(current_password.encode('utf-8'), user['password'].encode('utf-8')):
+        return jsonify({'message': 'Wrong password!'}), 401
+    if bcrypt.checkpw(new_password.encode('utf-8'), user['password'].encode('utf-8')):
+        return jsonify({'message': 'New password cannot be the same as the old one!'}), 400
+    hashed_new_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+    
+    cursor.execute("UPDATE users SET password = %s WHERE id = %s", (hashed_new_password, current_user['id']))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'Password changed')", (current_user['id'],))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return jsonify({'message': 'Password changed successfully!'}), 200
+
+@app.route("/forgotten-password", methods=['POST'])
+def forgotten_password():
+    data = request.get_json()
+    email = data.get('email')
+
+    if not email:
+        return jsonify({'message': 'Email is required!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cursor.fetchone()
+
+    if not user:
+        return jsonify({'message': 'User not found!'}), 404
+
+    reset_token = str(uuid.uuid4(expires=datetime.datetime.utcnow() + datetime.timedelta(hours=1)))
+    cursor.execute("DELETE FROM special_tokens WHERE action = 'Password Reset' AND token IN (SELECT token FROM special_tokens WHERE user_id = %s)", (user['id'],))
+    cursor.execute("INSERT INTO special_tokens (token, action) VALUES (%s, 'Password Reset')", (reset_token,))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return jsonify({'message': 'Password reset token generated!', 'reset_token': reset_token}), 200
+
+@app.route("/reset-password", methods=['POST'])
+def reset_password():
+    data = request.get_json()
+    reset_token = data.get('reset_token')
+    new_password = data.get('new_password')
+
+    if not reset_token or not new_password:
+        return jsonify({'message': 'Missing fields!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    cursor.execute("SELECT * FROM special_tokens WHERE token = %s AND action = 'Password Reset'", (reset_token,))
+    token_data = cursor.fetchone()
+
+    if not token_data:
+        return jsonify({'message': 'Invalid or expired reset token!'}), 401
+
+    cursor.execute("SELECT * FROM users WHERE id = %s", (token_data['user_id'],))
+    user = cursor.fetchone()
+
+    if not user:
+        return jsonify({'message': 'User not found!'}), 404
+
+    hashed_new_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+    
+    cursor.execute("UPDATE users SET password = %s WHERE id = %s", (hashed_new_password, user['id']))
+    cursor.execute("INSERT INTO logs (user_id, action) VALUES (%s, 'Password reset')", (user['id'],))
+    
+    cursor.execute("DELETE FROM special_tokens WHERE token = %s", (reset_token,))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return jsonify({'message': 'Password reset successfully!'}), 200
+
 if __name__ == '__main__':
     conn = mysql.connector.connect(
         host="localhost",
